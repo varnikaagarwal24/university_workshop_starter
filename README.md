@@ -212,6 +212,38 @@ Pick **1 primary question** and **2–4 supporting questions**. Then build:
 
 ---
 
+## My analytics project: Store Growth Readiness Scorecard
+
+**Primary question:** Which stores are genuinely positioned to keep growing, and what's quietly holding the others back?
+
+### Model summary
+
+Built the standard staging → intermediate → marts layering on top of the seeds:
+
+- `models/staging/` — one `stg_*` model per raw seed table (unchanged from the guided portion).
+- `models/intermediate/` — `int_product_cost` (supply cost/margin rollup by sku), `int_sales_line` (grain: 1 row per item sold — the base fact everything else rolls up from), `int_store_growth` (weekly revenue + trend by store), `int_store_revenue_concentration` (top-decile-order revenue share), `int_price_sensitivity` (price vs. units-sold rank within product_type), `int_perishable_exposure` (revenue tied to slow, thin-margin perishables).
+- `models/marts/` — `dim_store`, `dim_product`, `fct_sales_line`, and the payoff model `fct_store_scorecard`: one row per store combining all four signals, each normalized to 0–1, into a composite `growth_readiness_score`.
+- Tests: `unique`/`not_null` on all primary keys and the `fct_sales_line` grain, plus `dbt_utils.accepted_range(0, 1)` on `growth_readiness_score`.
+
+**Data limitation (important):** the seed data in this repo is a stripped-down slice of Jaffle Shop — all 686 orders belong to a single store (Philadelphia), spanning just 16 days (2016-09-01 to 2016-09-16). The other 5 stores have zero orders. So the scorecard is fully built and runs correctly for all 6 stores, but only Philadelphia has real signal — the other 5 correctly return `growth_readiness_score = null` (no sales to compute anything from) rather than a misleading 0.
+
+### The insight (with real numbers)
+
+Philadelphia's `growth_readiness_score` comes out to **0.53** — a moderate, mixed profile, not the "obviously fragile" or "obviously healthy" extreme:
+
+- **Growth trajectory**: classified `declining` (`growth_score = 0.0`) — weekly revenue was $3,031 → $3,123 → $664. But that last data point is a **partial week** (the seed data cuts off mid-week, on day 16), not a real slowdown — so this component is likely an artifact of the data window, not a genuine trend, and should be discounted.
+- **Revenue concentration**: `32.85%` of revenue comes from the top decile of orders (`concentration_score = 0.67`) — moderate, not alarming.
+- **Perishable exposure**: only `8.01%` of revenue ($546 of $6,818) is tied to slow-moving, thin-margin perishables (`perishable_score = 0.92`) — low risk. (Caveat: every one of the 10 SKUs in this seed dataset has at least one perishable supply component, so this signal is really being driven by the velocity/margin filters, not by perishability itself — worth re-checking against a fuller product catalog.)
+- **Pricing opportunity — the real finding**: `46.91%` of revenue is tied to SKUs that show untapped pricing power (`pricing_score = 0.53`). Concretely: **`BEV-004` ("for richer or pourover") is priced at $7 — the most expensive of the 5 beverages — yet it's also the single best-selling beverage at 168 units sold**, ahead of the $5 option (`BEV-002`, 158 units) and the $6 option (`BEV-001`, 154 units). The same pattern shows up in jaffles: `JAF-004` ($14, the priciest jaffle) is the #2 seller by units, and `JAF-003` ($12) is the #1 seller despite not being the cheapest. Demand isn't dropping at the top of the price band — that's evidence of room to raise price further without losing volume.
+
+**Bottom line:** Philadelphia's growth looks middling on paper, but the weak spot isn't fragility or wasted inventory — it's underpricing. Roughly half its revenue runs through products that could plausibly support a higher price with no observed volume penalty.
+
+### Next step
+
+Run a controlled price test on `BEV-004`: raise it ~10–15% (e.g. $7 → $8) for a 2–4 week window and monitor whether unit sales hold relative to the cheaper beverages. If volume doesn't drop, extend the same test to `JAF-003`/`JAF-004` and treat the pattern as a repeatable pricing-power signal to check for future menu items and other stores once they have order volume.
+
+---
+
 ## Workshop requirements checklist (use this to self-review)
 - [ ] Defined primary + supporting analytics questions
 - [ ] Built at least one `dim_*` and/or `fct_*` model
