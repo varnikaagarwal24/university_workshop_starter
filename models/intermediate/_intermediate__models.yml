@@ -1,0 +1,142 @@
+version: 2
+
+models:
+  - name: int_product_cost
+    description: >
+      One row per product SKU. Rolls up all `stg_supply` components tied to a SKU
+      into a total supply cost, and derives margin/margin_pct against
+      `stg_product.product_price`. A SKU is treated as perishable if ANY of its
+      supply components is perishable (e.g. a beverage with both a compostable cup
+      and a perishable ingredient like coffee or oatmilk is marked perishable).
+    columns:
+      - name: sku
+        description: Primary key. Product SKU.
+        tests:
+          - unique
+          - not_null
+      - name: product_name
+        description: Human-readable product name.
+      - name: product_type
+        description: Product category (e.g. jaffle, beverage).
+      - name: product_price
+        description: Menu price of the product, in dollars.
+      - name: supply_cost
+        description: Sum of all supply component costs for this SKU, in dollars.
+      - name: is_perishable
+        description: True if any supply component for this SKU is perishable.
+      - name: margin
+        description: product_price - supply_cost, in dollars.
+      - name: margin_pct
+        description: margin / product_price. Null if product_price is 0.
+
+  - name: int_sales_line
+    description: >
+      Grain: one row per item sold (one row per `stg_items.item_id`). The base
+      sales fact every other intermediate/mart model rolls up from. (order_id,
+      sku) is NOT unique on its own -- raw_items has no quantity column, so
+      ordering 2+ units of the same SKU in one order produces multiple rows
+      with the same (order_id, sku). Revenue per line is approximated as the
+      product's current menu price (there is no per-line price-paid column in
+      the source data); this reconciles exactly against `order_subtotal` for
+      all 686 orders in the seed data.
+    columns:
+      - name: item_id
+        description: Primary key. One row per unit of product sold.
+      - name: order_id
+        description: Foreign key to the order this line belongs to.
+      - name: sku
+        description: Foreign key to the product sold on this line.
+      - name: store_id
+        description: Foreign key to the store where this line was sold.
+      - name: customer_id
+        description: Foreign key to the customer who placed the order.
+      - name: order_date
+        description: Calendar date the order was placed.
+      - name: revenue
+        description: Revenue attributed to this line item, in dollars (= product_price).
+      - name: cost
+        description: Supply cost attributed to this line item, in dollars.
+      - name: margin
+        description: revenue - cost, in dollars.
+
+  - name: int_store_growth
+    description: >
+      Grain: store_id + week_number_since_opening. Weekly revenue per store,
+      bucketed by weeks elapsed since that store's opened_at date, plus a
+      trend_classification repeated across all week rows for that store.
+      Trend is computed by comparing the average weekly revenue in the first
+      half of the store's active weeks against the second half: more than 10%
+      up is 'growing', more than 10% down is 'declining', otherwise 'plateaued'.
+      Stores with fewer than 2 distinct weeks of sales get 'insufficient_data'.
+      Stores with zero sales have no rows in this model at all.
+    columns:
+      - name: store_id
+        description: Foreign key to dim_store.
+      - name: week_number_since_opening
+        description: Integer number of weeks elapsed since the store's opened_at date.
+      - name: weekly_revenue
+        description: Total revenue for the store during that week, in dollars.
+      - name: trend_classification
+        description: "One of: growing, plateaued, declining, insufficient_data."
+
+  - name: int_store_revenue_concentration
+    description: >
+      Grain: store_id. Measures how reliant a store's revenue is on a small
+      number of large orders. The top decile is the top ceil(10% of order count)
+      orders by per-order revenue. Revenue here is summed from int_sales_line
+      (product_price, tax-exclusive) rather than stg_order.order_total, so it
+      uses the same revenue definition as every other signal in
+      fct_store_scorecard -- order_total in stg_order is tax-inclusive
+      (subtotal + tax_paid) and mixing the two would make revenue_concentration_pct
+      inconsistent with the pricing/perishable signals.
+    columns:
+      - name: store_id
+        description: Foreign key to dim_store.
+      - name: total_revenue
+        description: Sum of per-order revenue across all of the store's orders, in dollars.
+      - name: top_decile_revenue
+        description: Sum of per-order revenue for the store's top-decile orders.
+      - name: revenue_concentration_pct
+        description: top_decile_revenue / total_revenue. Higher means more fragile (revenue concentrated in few large baskets).
+
+  - name: int_price_sensitivity
+    description: >
+      Grain: sku. Product-level signal (not store-level) comparing each SKU's
+      price and unit sales against peers in the same product_type. Flags SKUs
+      that are priced in the top half of their category AND still sell in the
+      top half by units — a sign that demand hasn't dropped despite the higher
+      price, implying there may be room to raise price further without losing
+      volume.
+    columns:
+      - name: sku
+        description: Primary key. Product SKU.
+      - name: product_type
+        description: Product category used as the peer group for ranking.
+      - name: product_price
+        description: Menu price, in dollars.
+      - name: units_sold
+        description: Total units sold across all stores (count of int_sales_line rows for this sku).
+      - name: price_rank_in_type
+        description: Rank of this SKU's price within its product_type, 1 = highest price.
+      - name: units_sold_rank_in_type
+        description: Rank of this SKU's units_sold within its product_type, 1 = most units sold.
+      - name: products_in_type
+        description: Number of distinct SKUs in this product_type, used to define "top half".
+      - name: pricing_opportunity_flag
+        description: True if the SKU is in the pricier half of its type and still in the better-selling half of its type.
+
+  - name: int_perishable_exposure
+    description: >
+      Grain: store_id. Measures how much of a store's revenue is tied to
+      products that are both perishable AND underperforming: below-median
+      units_sold (velocity) and below-median margin_pct, medians computed
+      globally across all SKUs.
+    columns:
+      - name: store_id
+        description: Foreign key to dim_store.
+      - name: total_revenue
+        description: Sum of revenue across all of the store's sales lines, in dollars.
+      - name: exposed_revenue
+        description: Revenue from SKUs that are perishable, below-median velocity, and below-median margin_pct.
+      - name: perishable_exposure_pct
+        description: exposed_revenue / total_revenue. Higher means more revenue at risk from slow-moving, thin-margin perishable inventory.

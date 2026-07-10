@@ -1,0 +1,148 @@
+version: 2
+
+models:
+  - name: dim_store
+    description: One row per store.
+    columns:
+      - name: store_id
+        description: Primary key.
+        tests:
+          - unique
+          - not_null
+      - name: store_name
+        description: Store name.
+      - name: opened_at
+        description: Timestamp the store opened.
+      - name: tax_rate
+        description: Local sales tax rate applied at this store.
+
+  - name: dim_product
+    description: One row per product SKU, with cost/margin rolled up from its supply components.
+    columns:
+      - name: sku
+        description: Primary key.
+        tests:
+          - unique
+          - not_null
+      - name: product_name
+        description: Human-readable product name.
+      - name: product_type
+        description: Product category (e.g. jaffle, beverage).
+      - name: product_price
+        description: Menu price, in dollars.
+      - name: supply_cost
+        description: Total cost of supply components for this SKU, in dollars.
+      - name: margin
+        description: product_price - supply_cost, in dollars.
+      - name: margin_pct
+        description: margin / product_price.
+      - name: is_perishable
+        description: True if any supply component for this SKU is perishable.
+
+  - name: fct_sales_line
+    description: >
+      Business-facing sales fact. Grain: one row per item sold (one row per
+      stg_items.item_id). Note (order_id, sku) is NOT a unique key on its own --
+      raw_items has no quantity column, so ordering 2+ units of the same SKU
+      in one order produces multiple item rows with the same (order_id, sku),
+      joined out to store and product attributes.
+    columns:
+      - name: item_id
+        description: Primary key. One row per unit of product sold.
+        tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: Foreign key to the order.
+        tests:
+          - not_null
+      - name: sku
+        description: Foreign key to dim_product.
+        tests:
+          - not_null
+      - name: store_id
+        description: Foreign key to dim_store.
+      - name: store_name
+        description: Denormalized store name.
+      - name: customer_id
+        description: Foreign key to the customer who placed the order.
+      - name: order_date
+        description: Calendar date the order was placed.
+      - name: product_name
+        description: Denormalized product name.
+      - name: product_type
+        description: Denormalized product category.
+      - name: is_perishable
+        description: Denormalized perishability flag.
+      - name: revenue
+        description: Revenue attributed to this line item, in dollars.
+      - name: cost
+        description: Supply cost attributed to this line item, in dollars.
+      - name: margin
+        description: revenue - cost, in dollars.
+
+  - name: fct_store_scorecard
+    description: >
+      The "Store Growth Readiness Scorecard". Grain: one row per store,
+      combining 4 signals -- growth trajectory, revenue concentration, pricing
+      opportunity exposure, and perishable exposure -- into a single composite
+      growth_readiness_score.
+
+      Each signal is normalized to a 0-1 sub-score where 1 is always "better
+      positioned to grow" and 0 is always "more at risk", so the four can be
+      combined directly:
+        - growth_score: 1.0 = growing, 0.5 = plateaued, 0.0 = declining,
+          null = insufficient_data (fewer than 2 distinct weeks of sales).
+        - concentration_score: 1 - revenue_concentration_pct. Lower
+          concentration (revenue spread across many orders, not a few large
+          ones) scores higher.
+        - pricing_score: 1 - pricing_opportunity_exposure_pct. Lower exposure
+          to underpriced-but-still-strong-selling SKUs scores higher (less
+          margin being left on the table).
+        - perishable_score: 1 - perishable_exposure_pct. Lower exposure to
+          slow-moving, thin-margin perishable inventory scores higher.
+
+      growth_readiness_score is the unweighted average of the four sub-scores:
+      (growth_score + concentration_score + pricing_score + perishable_score) / 4.
+      All four sub-scores must be non-null for a store to get a score --
+      stores with zero sales (5 of 6 stores in this seed dataset) will have
+      growth_readiness_score = null rather than a misleading 0 or a neutral
+      default, since there is no revenue to compute any of the four signals
+      from.
+    columns:
+      - name: store_id
+        description: Primary key.
+        tests:
+          - unique
+          - not_null
+      - name: store_name
+        description: Store name.
+      - name: opened_at
+        description: Timestamp the store opened.
+      - name: trend_classification
+        description: "One of: growing, plateaued, declining, insufficient_data, or null (no sales)."
+      - name: growth_score
+        description: Normalized 0-1 score derived from trend_classification.
+      - name: revenue_concentration_pct
+        description: "% of store revenue from its top-decile orders by order_total."
+      - name: concentration_score
+        description: 1 - revenue_concentration_pct.
+      - name: pricing_opportunity_exposure_pct
+        description: "% of store revenue from SKUs flagged as having untapped pricing power."
+      - name: pricing_score
+        description: 1 - pricing_opportunity_exposure_pct.
+      - name: perishable_exposure_pct
+        description: "% of store revenue from slow-moving, thin-margin perishable SKUs."
+      - name: perishable_score
+        description: 1 - perishable_exposure_pct.
+      - name: growth_readiness_score
+        description: >
+          Composite 0-1 score: unweighted average of growth_score,
+          concentration_score, pricing_score, and perishable_score. Higher
+          means the store is more genuinely positioned to keep growing. Null
+          for stores with no sales data.
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
